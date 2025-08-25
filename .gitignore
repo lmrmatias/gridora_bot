@@ -24,3 +24,6 @@ Thumbs.db
 # Optional
 package-lock.json
 yarn.lock
+
+test-suite.js
+simulation.js
