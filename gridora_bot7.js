@@ -15,13 +15,13 @@ function ellipsize(s) {
   if (s == null) return String(s);
   const str = String(s);
   if (str.length <= LOG_MAX_CHARS) return str;
-  return str.slice(0, LOG_MAX_CHARS) + ` …[+${str.length - LOG_MAX_CHARS} chars]`;
+  return str.slice(0, LOG_MAX_CHARS) + ` ï¿½[+${str.length - LOG_MAX_CHARS} chars]`;
 }
 function mask(str, keepStart = 6, keepEnd = 2) {
   if (!str) return str;
   const s = String(str);
   if (s.length <= keepStart + keepEnd) return '*'.repeat(Math.max(4, s.length));
-  return s.slice(0, keepStart) + '…' + '*'.repeat(8) + '…' + s.slice(-keepEnd);
+  return s.slice(0, keepStart) + 'ï¿½' + '*'.repeat(8) + 'ï¿½' + s.slice(-keepEnd);
 }
 function redactHeaders(h) {
   if (!LOG_REDACT_SECRETS || !h) return h;
@@ -205,7 +205,7 @@ ${gridToString(state.oppGrid)}
 /* =======================
    UTIL
    ======================= */
-// Kept as fallback only — primary path uses matchmaking token
+// Kept as fallback only ï¿½ primary path uses matchmaking token
 async function createJwtForRoom(room) {
   const now = Math.floor(Date.now() / 1000);
   const skew = 60;

@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Build output
+dist/
+build/
+.next/
+out/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Optional
+package-lock.json
+yarn.lock
+
+test-suite.js
+simulation.js
+
+heuristics_bot.js
+mcts_bot_v2_grandmaster.js
+mcts_bot_v3_planner.js
+tuner.js
+worker.js
+simulation_log_v2.json
+tuning_report.json
+mcts_bot_v3_tunable.js
