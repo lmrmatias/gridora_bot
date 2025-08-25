@@ -1,0 +1,12 @@
+{
+  "name": "gridora_bot",
+  "version": "1.0.0",
+  "description": "engine bot for the Gridora card game",
+  "main": "gridora_bot7.js",
+  "type": "module",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.0.0",
+    "jose": "^5.0.0",
+    "ws": "^8.0.0"
+  }
+}
