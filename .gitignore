@@ -27,3 +27,12 @@ yarn.lock
 
 test-suite.js
 simulation.js
+
+heuristics_bot.js
+mcts_bot_v2_grandmaster.js
+mcts_bot_v3_planner.js
+tuner.js
+worker.js
+simulation_log_v2.json
+tuning_report.json
+mcts_bot_v3_tunable.js
