@@ -1,130 +1,42 @@
-// bot.js
+/* 
+
+    bot.js by Luimati (fixed)
+    V1.4
+    August 2025
+
+*/
+
 import { createClient } from '@supabase/supabase-js';
 import WebSocket from 'ws';
 import { SignJWT } from 'jose';
 
-/* =======================
-   LOGGING UTILITIES
-   ======================= */
-const LOG_REDACT_SECRETS = true;
-const LOG_MAX_CHARS = 20000;
-
 const originalFetch = globalThis.fetch;
 
-function ellipsize(s) {
-  if (s == null) return String(s);
-  const str = String(s);
-  if (str.length <= LOG_MAX_CHARS) return str;
-  return str.slice(0, LOG_MAX_CHARS) + ` …[+${str.length - LOG_MAX_CHARS} chars]`;
-}
-function mask(str, keepStart = 6, keepEnd = 2) {
-  if (!str) return str;
-  const s = String(str);
-  if (s.length <= keepStart + keepEnd) return '*'.repeat(Math.max(4, s.length));
-  return s.slice(0, keepStart) + '…' + '*'.repeat(8) + '…' + s.slice(-keepEnd);
-}
-function redactHeaders(h) {
-  if (!LOG_REDACT_SECRETS || !h) return h;
-  const out = {};
-  const entries = h instanceof Headers ? [...h.entries()] : Object.entries(h);
-  for (const [k, v] of entries) {
-    const key = k.toLowerCase();
-    if (['authorization', 'apikey', 'x-api-key'].includes(key)) out[k] = mask(String(v));
-    else out[k] = String(v);
-  }
-  return out;
-}
-function redactBody(bodyStr) {
-  if (!LOG_REDACT_SECRETS || !bodyStr) return bodyStr;
-  try {
-    const obj = JSON.parse(bodyStr);
-    const scrub = (o) => {
-      if (o && typeof o === 'object') {
-        for (const k of Object.keys(o)) {
-          const lc = k.toLowerCase();
-          if (['password', 'access_token', 'refresh_token', 'token', 'jwt', 'api_key', 'apikey', 'secret'].includes(lc)) {
-            o[k] = mask(String(o[k]));
-          } else if (typeof o[k] === 'object') {
-            scrub(o[k]);
-          }
-        }
-      }
-    };
-    scrub(obj);
-    return JSON.stringify(obj);
-  } catch {
-    return bodyStr
-      .replace(/(access_token|refresh_token|token|jwt|api_key|apikey|secret)"?\s*:\s*"([^"]+)"/gi, (_m, k, v) => `${k}:"${mask(v)}"`)
-      .replace(/(Bearer\s+)([A-Za-z0-9\.\-\_=]+)/gi, (_m, p1, p2) => p1 + mask(p2));
-  }
-}
-function sanitizeUrl(url) {
-  if (!LOG_REDACT_SECRETS) return url;
-  try {
-    const u = new URL(url);
-    for (const p of ['jwt', 'api_key', 'apikey']) {
-      if (u.searchParams.has(p)) u.searchParams.set(p, mask(u.searchParams.get(p)));
-    }
-    return u.toString();
-  } catch {
-    return url;
-  }
-}
-async function loggedFetch(url, options = {}) {
-  const method = options.method || 'GET';
-  let bodyStr = '';
-  if (options.body != null) {
-    bodyStr = typeof options.body === 'string' ? options.body : (() => {
-      try { return JSON.stringify(options.body); } catch { return String(options.body); }
-    })();
-  }
-  console.log(
-    '??  HTTP REQUEST:',
-    method,
-    sanitizeUrl(String(url)),
-    '\nHeaders:', redactHeaders(options.headers || {}),
-    '\nBody:', ellipsize(redactBody(bodyStr))
-  );
-  const res = await originalFetch(url, options);
-  const clone = res.clone();
-  let text = '';
-  try { text = await clone.text(); } catch { text = '[non-text body]'; }
-  console.log(
-    '??  HTTP RESPONSE:',
-    res.status, res.statusText, 'from', sanitizeUrl(String(url)),
-    '\nBody:', ellipsize(redactBody(text))
-  );
-  return res;
-}
-globalThis.fetch = loggedFetch;
-
-/* =======================
-   CONFIG
-   ======================= */
 const SUPABASE_URL = "https://pvhtheidiovgdkxiqoaj.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InB2aHRoZWlkaW92Z2RreGlxb2FqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDYxMTE1MTksImV4cCI6MjA2MTY4NzUxOX0.XWJrvn1D_9jteRF4rfFq7LKrasarWCH22dNtjNbY7tk";
-
 const PIESOCKET_INSTANCE_ID = "s14871.blr1";
 const PIESOCKET_API_KEY = "GXU7TnLz0aNJFWXXyCF6l0CYBMJ5CdbF4tuY8Oed";
-const PIESOCKET_APP_SECRET = "";
 
-/* =======================
-   TIMING
-   ======================= */
 const START_TURN_DELAY_MS = 2000;
 const sleep = (ms) => new Promise(res => setTimeout(res, ms));
 
-/* =======================
-   STATE
-   ======================= */
+const TOTAL_ROUNDS = 13;
+const COMMUNITY_TARGET = 7; // Always try to maintain 7 community cards while deck has cards
+
+const parseDeckString = (s) => String(s).trim().split(/\s+/).filter(Boolean);
+const randomInt = (n) => Math.floor(Math.random() * n);
+
+// Tracks any card that has been placed on either grid so refills skip them
+const consumedCards = new Set();
+
 const state = {
   isHost: false,
-  ws: /** @type {WebSocket|null} */(null),
+  ws: /** @type {WebSocket|null} */ (null),
 
   matchId: null,
-  deck: /** @type {string[]} */([]),
-  deckPtr: 0,                 // draw from END
-  community: /** @type {string[]} */([]),
+  deck: /** @type {string[]} */ ([]),
+  deckPtr: 0,
+  community: /** @type {string[]} */ ([]),
 
   myGrid: Array.from({ length: 5 }, () => Array(5).fill(null)),
   oppGrid: Array.from({ length: 5 }, () => Array(5).fill(null)),
@@ -133,9 +45,9 @@ const state = {
   oppPlaced: 0,
 
   myTurn: false,
-  turnOwner: 'me',            // 'me' | 'opp'
+  turnOwner: 'me',
   turnPlacements: 0,
-  requiredThisTurn: 0,        // snapshot at beginTurn()
+  requiredThisTurn: 0,
   myPlacedAtTurnStart: 0,
   oppPlacedAtTurnStart: 0,
 
@@ -145,24 +57,40 @@ const state = {
   gameStarted: false,
   gameOver: false,
 
-  // buffer opponent placements that arrive while it's not their turn
   oppBufferedPlacements: 0,
-
-  // guard to avoid duplicate/overlapping refills
   isRefilling: false,
 };
 
-/* =======================
-   INSIGHT / DEBUG PRINTS
-   ======================= */
-const TOTAL_ROUNDS = Math.ceil((25 * 2) / 4); // 13
+async function loggedFetch(url, options = {}) {
+  const method = options.method || 'GET';
+  const headers = options.headers || {};
+  let bodyStr = '';
+  if (options.body != null) {
+    if (typeof options.body === 'string') bodyStr = options.body;
+    else {
+      try { bodyStr = JSON.stringify(options.body); }
+      catch { bodyStr = String(options.body); }
+    }
+  }
+
+  console.log('  HTTP REQUEST:', method, String(url), '\nHeaders:', headers, '\nBody:', bodyStr);
+  const res = await originalFetch(url, options);
+  const clone = res.clone();
+  let text = '';
+  try { text = await clone.text(); }
+  catch { text = '[non-text body]'; }
+  console.log('  HTTP RESPONSE:', res.status, res.statusText, 'from', String(url), '\nBody:', text);
+  return res;
+}
+globalThis.fetch = loggedFetch;
 
 function gridToString(grid) {
   const show = (v) => (v == null ? '..' : String(v)).padEnd(3, ' ');
   return grid.map(row => row.map(show).join(' ')).join('\n');
 }
+
 function currentRoundInfo() {
-  const totalPlaced = state.myPlaced + state.oppPlaced; // across both players
+  const totalPlaced = state.myPlaced + state.oppPlaced;
   const completedRounds = Math.floor(totalPlaced / 4);
   let round = completedRounds + 1;
   if (round > TOTAL_ROUNDS) round = TOTAL_ROUNDS;
@@ -174,10 +102,12 @@ function currentRoundInfo() {
 
   return { round, plannedThisRound, placedThisRound, roundRemaining, totalPlaced };
 }
+
 function turnsRemaining(placed) {
   const rem = Math.max(0, 25 - placed);
   return Math.ceil(rem / 2);
 }
+
 function logGameState(reason = '') {
   const { round, plannedThisRound, placedThisRound, roundRemaining, totalPlaced } = currentRoundInfo();
   const thisTurnReq = state.requiredThisTurn;
@@ -185,113 +115,103 @@ function logGameState(reason = '') {
   const myTurnsRem = turnsRemaining(state.myPlaced);
   const oppTurnsRem = turnsRemaining(state.oppPlaced);
 
-  console.log(
-`================= ?? STATE ${reason ? `(${reason})` : ''} =================
-Round: ${round}/${TOTAL_ROUNDS} | This Round: placed ${placedThisRound}/${plannedThisRound} | Round remaining cards: ${roundRemaining}
-Overall placed: my ${state.myPlaced}/25, opp ${state.oppPlaced}/25 (total ${totalPlaced}/50)
-Turn: owner=${state.turnOwner} | placed this turn=${state.turnPlacements}/${thisTurnReq} | this turn remaining=${thisTurnRem}
-Turns remaining: my ${myTurnsRem}, opp ${oppTurnsRem}
-Deck remaining: ${state.deckPtr} | Community (${state.community.length}): [${state.community.join(' ')}]
+  console.log("====================================");
+  console.log(` STATE ${reason ? `(${reason})` : ""}`);
+  console.log("------------------------------------");
+  console.log(`Round: ${round}/${TOTAL_ROUNDS}`);
+  console.log(`This Round: placed ${placedThisRound}/${plannedThisRound} | Remaining cards: ${roundRemaining}`);
+  console.log(`Overall placed: my ${state.myPlaced}/25, opp ${state.oppPlaced}/25 (total ${totalPlaced}/50)`);
+  console.log(`Turn: owner=${state.turnOwner} | placed this turn=${state.turnPlacements}/${thisTurnReq} | remaining=${thisTurnRem}`);
+  console.log(`Turns remaining: my ${myTurnsRem}, opp ${oppTurnsRem}`);
+  console.log(`Deck remaining: ${state.deckPtr} | Community (${state.community.length}): [${state.community.join(" ")}]`);
 
-My Grid:
-${gridToString(state.myGrid)}
+  console.log("\nMy Grid:");
+  console.log(gridToString(state.myGrid));
 
-Opp Grid:
-${gridToString(state.oppGrid)}
-==================================================================`
-  );
+  console.log("\nOpp Grid:");
+  console.log(gridToString(state.oppGrid));
+
+  console.log("====================================");
 }
 
-/* =======================
-   UTIL
-   ======================= */
-// Kept as fallback only — primary path uses matchmaking token
-async function createJwtForRoom(room) {
-  const now = Math.floor(Date.now() / 1000);
-  const skew = 60;
-  const iat = now - skew;
-  const nbf = now - skew;
-  const exp = now + 60 * 10;
-  return await new SignJWT({})
-    .setProtectedHeader({ alg: 'HS256' })
-    .setIssuedAt(iat)
-    .setNotBefore(nbf)
-    .setExpirationTime(exp)
-    .setSubject(room)
-    .sign(new TextEncoder().encode(PIESOCKET_APP_SECRET));
-}
-function parseDeckString(deckStr) {
-  return String(deckStr).trim().split(/\s+/).filter(Boolean);
-}
-function randomInt(n) {
-  return Math.floor(Math.random() * n);
-}
-function drawFromDeck(count) { // draw from END
-  const take = Math.min(count, state.deckPtr);
-  const start = state.deckPtr - take;
-  const drawn = state.deck.slice(start, state.deckPtr);
-  state.deckPtr = start;
+/** Draw from the top (end) of state.deck, skipping any already-consumed cards */
+function drawFromDeck(count) {
+  const drawn = [];
+  while (drawn.length < count && state.deckPtr > 0) {
+    const next = state.deck[state.deckPtr - 1];
+    state.deckPtr -= 1;
+    // Skip cards that were already placed (by anyone)
+    if (consumedCards.has(next)) continue;
+    drawn.push(next);
+  }
   return drawn;
 }
+
 function initCommunity() {
-  state.community = drawFromDeck(7);
-  console.log("?? Initial community:", state.community);
+  state.community = drawFromDeck(COMMUNITY_TARGET);
+  console.log(" Initial community:", state.community);
   logGameState('initCommunity');
 }
 
 /* =======================
-   GAME OVER / PASS HELPERS
+   GAME OVER / PASS
    ======================= */
-function isGameOver() {
-  return state.myPlaced >= 25 && state.oppPlaced >= 25;
-}
+const isGameOver = () => state.myPlaced >= 25 && state.oppPlaced >= 25;
+
 function finishGame(reason = 'all cards placed') {
   if (state.gameOver) return;
   state.gameOver = true;
-  console.log(`?? GAME OVER (${reason})`);
+  console.log(` GAME OVER (${reason})`);
   logGameState('game_over');
-  // Optional: state.ws?.close();
 }
 
-/* =======================
-   TURN MGMT
-   ======================= */
 function pickRandomEmptyCell(grid) {
   const empties = [];
-  for (let r = 0; r < 5; r++) for (let c = 0; c < 5; c++) {
-    if (grid[r][c] === null) empties.push([r, c]);
-  }
-  if (empties.length === 0) return null;
-  return empties[randomInt(empties.length)];
+  for (let r = 0; r < 5; r++)
+    for (let c = 0; c < 5; c++) {
+      if (grid[r][c] === null) empties.push([r, c]);
+    }
+  return empties.length ? empties[randomInt(empties.length)] : null;
 }
+
 function removeCardFromCommunity(card) {
   const idx = state.community.indexOf(card);
-  if (idx >= 0) state.community.splice(idx, 1);
+  if (idx >= 0) {
+    state.community.splice(idx, 1);
+    return true;
+  }
+  return false;
 }
+
 function sendPlaceCard(ws, card, row, col) {
-  const opponent_time = 100 + randomInt(300);
-  const payload = {
+  const opponent_time = 100 + randomInt(30);
+  ws.send(JSON.stringify({
     c2dictionary: true,
     data: { type: "place_card", card, col, row, opponent_time }
-  };
-  ws.send(JSON.stringify(payload)); // ws wrapper logs this
+  }));
 }
 
 function computeRequiredForStart(owner) {
   const placedAtStart = (owner === 'me') ? state.myPlaced : state.oppPlaced;
-  const remaining = 25 - placedAtStart;
-  return Math.min(2, Math.max(0, remaining));
+  return Math.min(2, Math.max(0, 25 - placedAtStart));
 }
 
 async function onOpponentPlacedOne(card, row, col) {
   if (state.gameOver) return;
 
-  // reflect board/community immediately
+  // Mark as consumed BEFORE any potential refill
+  consumedCards.add(card);
+
   if (row >= 0 && row < 5 && col >= 0 && col < 5) state.oppGrid[row][col] = card;
+
+  // Remove from community (affects top-up at end of turn)
   removeCardFromCommunity(card);
   state.oppPlaced += 1;
 
-  if (isGameOver()) { finishGame('opponent finished'); return; }
+  if (isGameOver()) {
+    finishGame('opponent finished');
+    return;
+  }
 
   if (state.turnOwner === 'opp') {
     state.turnPlacements += 1;
@@ -315,7 +235,6 @@ function beginTurn(owner) {
   if (owner === 'me') {
     state.myPlacedAtTurnStart = state.myPlaced;
   } else {
-    // Opp turn: apply buffered moves into this turn immediately
     state.oppPlacedAtTurnStart = state.oppPlaced - state.oppBufferedPlacements;
     if (state.oppBufferedPlacements > 0) {
       state.turnPlacements = state.oppBufferedPlacements;
@@ -324,45 +243,52 @@ function beginTurn(owner) {
   }
 
   state.myTurn = (owner === 'me');
-  console.log(state.myTurn ? "?? Our turn" : "?? Opponent's turn");
+  console.log(state.myTurn ? " Our turn" : " Opponent's turn");
   logGameState('beginTurn');
 
-  // If game already complete, finish.
-  if (isGameOver()) { finishGame('all cards placed at turn start'); return; }
-
-  // If this player has *no moves* (requiredThisTurn === 0), immediately pass.
-  if (state.requiredThisTurn === 0) {
-    setTimeout(() => { if (!state.gameOver) void endTurnAndRefillSafe(); }, 0);
+  if (isGameOver()) {
+    finishGame('all cards placed at turn start');
     return;
   }
-
-  // If buffered moves already complete their requirement, end immediately.
+  if (state.requiredThisTurn === 0) {
+    setTimeout(() => {
+      if (!state.gameOver) void endTurnAndRefillSafe();
+    }, 0);
+    return;
+  }
   if (state.turnPlacements >= state.requiredThisTurn && owner === 'opp') {
-    setTimeout(() => { if (!state.gameOver) void endTurnAndRefillSafe(); }, 0);
+    setTimeout(() => {
+      if (!state.gameOver) void endTurnAndRefillSafe();
+    }, 0);
   }
 }
 
-// Async, guarded, and auto-starts our turn if we become the owner.
 async function endTurnAndRefillSafe() {
   if (state.gameOver || state.isRefilling) return;
   state.isRefilling = true;
 
-  const toDraw = state.turnPlacements; // freeze
-  if (toDraw > 0) {
-    const drawn = drawFromDeck(toDraw);
-    state.community.push(...drawn);
-    console.log(`?? Drew ${drawn.length} replacement(s):`, drawn, "? community:", state.community);
+  // Always top up to COMMUNITY_TARGET while deck has cards (skips consumed internally)
+  const want = Math.max(0, COMMUNITY_TARGET - state.community.length);
+  const can = Math.min(want, state.deckPtr);
+  if (can > 0) {
+    const drawn = drawFromDeck(can);
+    if (drawn.length) {
+      state.community.push(...drawn);
+      console.log(` Refilled community by ${drawn.length}:`, drawn, "? community:", state.community);
+    } else {
+      console.log(` Refill attempted but no non-consumed cards available (want ${want}, deckPtr ${state.deckPtr}).`);
+    }
+  } else {
+    console.log(` No refill possible (want ${want}, deckPtr ${state.deckPtr}).`);
   }
 
-  // Flip owner
   const nextOwner = (state.turnOwner === 'me') ? 'opp' : 'me';
   beginTurn(nextOwner);
 
   state.isRefilling = false;
 
-  // If it's now our turn and we do have required moves, start playing
   if (!state.gameOver && state.myTurn && state.requiredThisTurn > 0) {
-    await sleep(300 + randomInt(400));
+    await sleep(1000 + randomInt(700));
     await playMyTurn();
   }
 }
@@ -372,31 +298,44 @@ async function endTurnAndRefillSafe() {
    ======================= */
 function botPlaceOne() {
   if (!state.ws || state.gameOver) return false;
-  if (state.community.length === 0) { console.warn("No community cards available to place."); return false; }
+  if (state.community.length === 0) {
+    console.warn("No community cards available to place.");
+    return false;
+  }
 
   const cell = pickRandomEmptyCell(state.myGrid);
-  if (!cell) { console.warn("No empty cell available on our grid."); return false; }
+  if (!cell) {
+    console.warn("No empty cell available on our grid.");
+    return false;
+  }
   const [row, col] = cell;
   const card = state.community[randomInt(state.community.length)];
 
   state.myGrid[row][col] = card;
+
+  // Mark as consumed and remove from community so it can never be re-dealt
+  consumedCards.add(card);
   removeCardFromCommunity(card);
+
   sendPlaceCard(state.ws, card, row, col);
   state.turnPlacements += 1;
   state.myPlaced += 1;
 
   logGameState(`bot placed ${card} @ r${row},c${col}`);
 
-  if (isGameOver()) { finishGame('bot finished'); return false; }
+  if (isGameOver()) {
+    finishGame('bot finished');
+    return false;
+  }
   return true;
 }
 
 async function playMyTurn() {
   if (!state.ws || !state.myTurn || state.gameOver) return;
-  const need = state.requiredThisTurn; // snapshot for this turn
+  const need = state.requiredThisTurn;
   if (need === 0) return;
 
-  console.log(`?? Our turn: need to place ${need} card(s).`);
+  console.log(` Our turn: need to place ${need} card(s).`);
   let placed = 0;
   for (let i = 0; i < need; i++) {
     const ok = botPlaceOne();
@@ -406,9 +345,9 @@ async function playMyTurn() {
     await sleep(300 + randomInt(500));
   }
   if (!state.gameOver && placed < need) {
-    console.warn(`?? Could not complete required placements (needed ${need}, placed ${placed}).`);
+    console.warn(` Could not complete required placements (needed ${need}, placed ${placed}).`);
   }
-  if (!state.gameOver) await endTurnAndRefillSafe(); // draw and flip
+  if (!state.gameOver) await endTurnAndRefillSafe();
 }
 
 /* =======================
@@ -432,20 +371,19 @@ async function confirmReadyAndStore(JWT_TOKEN, matchId) {
   let payload;
   try { payload = await readyRes.json(); } catch { payload = null; }
   const data = (payload && payload.data) ? payload.data :
-               (Array.isArray(payload) && payload[0]) || payload || {};
+    (Array.isArray(payload) && payload[0]) || payload || {};
   state.matchId = Number(data.match_id ?? matchId);
   state.deck = parseDeckString(data.shuffled_deck || "");
-  state.deckPtr = state.deck.length; // draw from END
+  state.deckPtr = state.deck.length;
   state.matchStatus = data.match_status || null;
   state.opponentId = data.opponent_id || null;
 
-  console.log("?? Stored match/deck:", {
+  console.log(" Stored match/deck:", {
     matchId: state.matchId,
     deckCount: state.deck.length,
     last7: state.deck.slice(Math.max(0, state.deck.length - 7))
   });
 
-  // If backend reports in_progress, trigger game_started once
   if (
     state.matchStatus === "in_progress" &&
     !state.gameStarted &&
@@ -454,19 +392,19 @@ async function confirmReadyAndStore(JWT_TOKEN, matchId) {
   ) {
     const startPayload = { c2dictionary: true, data: { type: "game_started" } };
     state.ws.send(JSON.stringify(startPayload));
-    console.log("?? Sent game_started (backend reported in_progress).");
-          if (state.gameStarted) return;          // guard duplicate starts
-      state.gameStarted = true;
-      console.log("?? GAME STARTED");
+    console.log(" Sent game_started (backend reported in_progress).");
+    if (state.gameStarted) return;
+    state.gameStarted = true;
+    console.log(" GAME STARTED");
 
-      initCommunity();                         // initial 7
-      beginTurn(state.isHost ? 'me' : 'opp');
+    initCommunity();
+    beginTurn(state.isHost ? 'me' : 'opp');
 
-      if (state.myTurn && state.requiredThisTurn > 0) {
-        await sleep(START_TURN_DELAY_MS);
-        await playMyTurn();
-      }
-      return;
+    if (state.myTurn && state.requiredThisTurn > 0) {
+      await sleep(START_TURN_DELAY_MS);
+      await playMyTurn();
+    }
+    return;
   }
 
   return data;
@@ -476,11 +414,14 @@ async function confirmReadyAndStore(JWT_TOKEN, matchId) {
    MAIN
    ======================= */
 async function runBot(email, password) {
-  console.log(`?? Starting Gridora bot for ${email}...`);
+  console.log(` Starting Gridora bot for ${email}...`);
 
   const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { global: { fetch: loggedFetch } });
   const { data: authData, error: authError } = await supabase.auth.signInWithPassword({ email, password });
-  if (authError) { console.error("? Authentication failed:", authError.message); return; }
+  if (authError) {
+    console.error("? Authentication failed:", authError.message);
+    return;
+  }
   const JWT_TOKEN = authData.session.access_token;
   console.log("? Authenticated.");
 
@@ -490,35 +431,36 @@ async function runBot(email, password) {
     body: JSON.stringify({})
   });
   const matchResp = await res.json();
-  console.log("?? Matchmaking response:", matchResp);
-  if (!matchResp.success) { console.error("? Matchmaking failed:", matchResp.error); return; }
+  console.log(" Matchmaking response:", matchResp);
+  if (!matchResp.success) {
+    console.error("? Matchmaking failed:", matchResp.error);
+    return;
+  }
 
   const { room, match_id, player1_nickname, player2_nickname } = matchResp.data;
   state.isHost = (match_id === null);
   const matchId = match_id || parseInt(room.split("_").pop());
 
-  // Use token provided by matchmaking; fallback to local JWT if missing
   const wsJwt = matchResp.token || await createJwtForRoom(room);
   const wsUrl = `wss://${PIESOCKET_INSTANCE_ID}.piesocket.com/v3/${room}?api_key=${PIESOCKET_API_KEY}&jwt=${wsJwt}`;
-  console.log('?? WS CONNECT:', sanitizeUrl(wsUrl));
+  console.log(' WS CONNECT:', wsUrl);
 
   const ws = new WebSocket(wsUrl);
   state.ws = ws;
 
-  // Single-source WS send logging
   const rawSend = ws.send;
-  ws.send = function (data, ...args) {
-    const outStr = typeof data === 'string' ? data
-      : Buffer.isBuffer(data) ? data.toString('utf8')
-      : (() => { try { return JSON.stringify(data); } catch { return String(data); } })();
-    console.log('?? WS SEND:', ellipsize(outStr));
+  ws.send = function(data, ...args) {
+    const outStr = typeof data === 'string' ? data :
+      Buffer.isBuffer(data) ? data.toString('utf8') :
+      (() => { try { return JSON.stringify(data); } catch { return String(data); } })();
+    console.log(' WS SEND:', outStr);
     return rawSend.call(ws, data, ...args);
   };
 
   ws.on('open', async () => {
-    console.log("?? WebSocket connected to room:", room);
+    console.log(" WebSocket connected to room:", room);
     if (state.isHost) {
-      console.log("?? Host: waiting for opponent...");
+      console.log(" Host: waiting for opponent...");
     } else {
       const joinPayload = {
         c2dictionary: true,
@@ -531,14 +473,14 @@ async function runBot(email, password) {
         }
       };
       ws.send(JSON.stringify(joinPayload));
-      console.log("?? Sent opponent_joined payload.");
+      console.log(" Sent opponent_joined payload.");
       await confirmReadyAndStore(JWT_TOKEN, matchId);
     }
   });
 
   ws.on('message', async (buf) => {
     const text = buf.toString();
-    console.log("?? WS RECV:", ellipsize(text));
+    console.log(" WS RECV:", text);
 
     let msg;
     try { msg = JSON.parse(text); } catch { return; }
@@ -547,17 +489,17 @@ async function runBot(email, password) {
     const type = msg.data.type;
 
     if (state.isHost && type === "opponent_joined") {
-      console.log("?? Opponent joined. Confirming ready...");
+      console.log(" Opponent joined. Confirming ready...");
       await confirmReadyAndStore(JWT_TOKEN, matchId);
       return;
     }
 
     if (type === "game_started") {
-      if (state.gameStarted) return;          // guard duplicate starts
+      if (state.gameStarted) return;
       state.gameStarted = true;
-      console.log("?? GAME STARTED");
+      console.log(" GAME STARTED");
 
-      initCommunity();                         // initial 7
+      initCommunity();
       beginTurn(state.isHost ? 'me' : 'opp');
 
       if (state.myTurn && state.requiredThisTurn > 0) {
@@ -567,21 +509,32 @@ async function runBot(email, password) {
       return;
     }
 
-    if (type === "activate_card") {
-      // ignore per requirement
-      return;
-    }
+    if (type === "activate_card") return;
 
     if (type === "place_card") {
       const { card, row, col } = msg.data;
-      console.log(`?? Opponent placed ${card} at r${row},c${col}`);
-      await onOpponentPlacedOne(String(card), Number(row), Number(col)); // await to keep order
+      console.log(` Opponent placed ${card} at r${row},c${col}`);
+      await onOpponentPlacedOne(String(card), Number(row), Number(col));
       return;
     }
   });
 
-  ws.on('close', () => console.log("?? WebSocket closed."));
-  ws.on('error', (err) => console.error("?? WebSocket error:", err.message));
+  ws.on('close', () => console.log(" WebSocket closed."));
+  ws.on('error', (err) => console.error(" WebSocket error:", err.message));
+}
+
+/* =======================
+   JWT helper (unchanged placeholder; implement if needed)
+   ======================= */
+async function createJwtForRoom(room) {
+  // NOTE: Replace with your real signing key if required by your infra.
+  // Here we just build a short-lived unsigned token if your PieSocket config allows;
+  // otherwise wire up SignJWT with your secret.
+  return new SignJWT({ room })
+    .setProtectedHeader({ alg: 'HS256' })
+    .setIssuedAt()
+    .setExpirationTime('10m')
+    .sign(new TextEncoder().encode('replace-with-your-secret'));
 }
 
 /* =======================
